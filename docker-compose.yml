@@ -1,81 +1,206 @@
+version: '3.8'
+
 services:
-  chirpstack:
-    image: chirpstack/chirpstack:4
-    command: -c /etc/chirpstack
-    restart: unless-stopped
-    volumes:
-      - ./configuration/chirpstack:/etc/chirpstack
-    depends_on:
-      - postgres
-      - mosquitto
-      - redis
-    environment:
-      - MQTT_BROKER_HOST=mosquitto
-      - REDIS_HOST=redis
-      - POSTGRESQL_HOST=postgres
-    ports:
-      - "8080:8080"
-
-  chirpstack-gateway-bridge:
-    image: chirpstack/chirpstack-gateway-bridge:4
-    restart: unless-stopped
-    ports:
-      - "1700:1700/udp"
-    volumes:
-      - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
-    environment:
-      - INTEGRATION__MQTT__EVENT_TOPIC_TEMPLATE=eu868/gateway/{{ .GatewayID }}/event/{{ .EventType }}
-      - INTEGRATION__MQTT__STATE_TOPIC_TEMPLATE=eu868/gateway/{{ .GatewayID }}/state/{{ .StateType }}
-      - INTEGRATION__MQTT__COMMAND_TOPIC_TEMPLATE=eu868/gateway/{{ .GatewayID }}/command/#
-    depends_on:
-      - mosquitto
-  
-  chirpstack-gateway-bridge-basicstation:
-    image: chirpstack/chirpstack-gateway-bridge:4
-    restart: unless-stopped
-    command: -c /etc/chirpstack-gateway-bridge/chirpstack-gateway-bridge-basicstation-eu868.toml
-    ports:
-      - "3001:3001"
-    volumes:
-      - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
-    depends_on:
-      - mosquitto
-
-  chirpstack-rest-api:
-    image: chirpstack/chirpstack-rest-api:4
-    restart: unless-stopped
-    command: --server chirpstack:8080 --bind 0.0.0.0:8090 --insecure
-    ports:
-      - "8090:8090"
-    depends_on:
-      - chirpstack
-
   postgres:
     image: postgres:14-alpine
+    container_name: chirpstack-postgres
     restart: unless-stopped
     volumes:
-      - ./configuration/postgresql/initdb:/docker-entrypoint-initdb.d
       - postgresqldata:/var/lib/postgresql/data
+      - postgres-init-scripts:/docker-entrypoint-initdb.d:ro
     environment:
       - POSTGRES_USER=chirpstack
       - POSTGRES_PASSWORD=chirpstack
       - POSTGRES_DB=chirpstack
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    networks:
+      - chirpstack-net
 
   redis:
     image: redis:7-alpine
+    container_name: chirpstack-redis
     restart: unless-stopped
     command: redis-server --save 300 1 --save 60 100 --appendonly no
     volumes:
       - redisdata:/data
+    networks:
+      - chirpstack-net
 
   mosquitto:
     image: eclipse-mosquitto:2
+    container_name: chirpstack-mosquitto
     restart: unless-stopped
     ports:
-      - "1883:1883"
-    volumes: 
-      - ./configuration/mosquitto/config/:/mosquitto/config/
+      - "${MQTT_PORT:-1883}:1883"
+    volumes:
+      - mosquitto-config:/mosquitto/config
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    networks:
+      - chirpstack-net
+
+  config-init:
+    image: alpine:latest
+    container_name: chirpstack-config-init
+    environment:
+      - CHIRPSTACK_API_SECRET=${CHIRPSTACK_API_SECRET:-}
+      - CHIRPSTACK_REGION=${CHIRPSTACK_REGION:-eu868}
+      - CHIRPSTACK_NETWORK_ID=${CHIRPSTACK_NETWORK_ID:-000000}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "Installing dependencies..."
+        apk add --no-cache git openssl
+        
+        echo "Cloning ChirpStack Docker repository..."
+        git clone https://github.com/chirpstack/chirpstack-docker.git /tmp/chirpstack-repo
+        
+        echo "Copying configuration files..."
+        mkdir -p /etc/chirpstack
+        cp -r /tmp/chirpstack-repo/configuration/chirpstack/* /etc/chirpstack/
+        
+        mkdir -p /etc/chirpstack-gateway-bridge
+        cp -r /tmp/chirpstack-repo/configuration/chirpstack-gateway-bridge/* /etc/chirpstack-gateway-bridge/
+        
+        mkdir -p /mosquitto/config
+        cp -r /tmp/chirpstack-repo/configuration/mosquitto/config/* /mosquitto/config/
+        
+        mkdir -p /postgres-init
+        cp -r /tmp/chirpstack-repo/configuration/postgresql/initdb/* /postgres-init/
+        chmod +x /postgres-init/*.sh
+        
+        echo ""
+        
+        # Check if secret file already exists (from previous deployment)
+        if [ -f /etc/chirpstack/.api-secret ]; then
+          echo "Using existing API secret from previous deployment"
+          API_SECRET=$(cat /etc/chirpstack/.api-secret)
+        # Check if user provided a secret via environment variable
+        elif [ -n "$$CHIRPSTACK_API_SECRET" ]; then
+          echo "Using API secret from environment variable"
+          API_SECRET="$$CHIRPSTACK_API_SECRET"
+          echo "$$CHIRPSTACK_API_SECRET" > /etc/chirpstack/.api-secret
+        else
+          echo "No API secret provided - generating new random secret..."
+          API_SECRET=$(openssl rand -base64 32)
+          echo "$$API_SECRET" > /etc/chirpstack/.api-secret
+          echo ""
+          echo "Generated API Secret:"
+          echo "$$API_SECRET"
+          echo ""
+          echo "This secret is used for API tokens and will persist across restarts."
+          echo "Retrieve anytime from: docker exec chirpstack-server cat /etc/chirpstack/.api-secret"
+          echo ""
+          echo "***********"
+          echo ""
+        fi
+        
+        # Update configurations
+        sed -i "s|secret=\"you-must-replace-this\"|secret=\"$$API_SECRET\"|g" /etc/chirpstack/chirpstack.toml
+        sed -i "s|net_id=\"000000\"|net_id=\"$$CHIRPSTACK_NETWORK_ID\"|g" /etc/chirpstack/chirpstack.toml
+        
+        echo ""
+        echo "Region: $$CHIRPSTACK_REGION"
+        echo "Network ID: $$CHIRPSTACK_NETWORK_ID"
+        echo ""
+        echo "Configuration initialized successfully!"
+    volumes:
+      - chirpstack-config:/etc/chirpstack
+      - gateway-bridge-config:/etc/chirpstack-gateway-bridge
+      - mosquitto-config:/mosquitto/config
+      - postgres-init-scripts:/postgres-init
+    networks:
+      - chirpstack-net
+
+  chirpstack:
+    image: chirpstack/chirpstack:4
+    container_name: chirpstack-server
+    command: -c /etc/chirpstack
+    restart: unless-stopped
+    volumes:
+      - chirpstack-config:/etc/chirpstack:ro
+    environment:
+      - POSTGRESQL_HOST=postgres
+      - REDIS_HOST=redis
+      - MQTT_BROKER_HOST=mosquitto
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      mosquitto:
+        condition: service_started
+    ports:
+      - "${CHIRPSTACK_HTTP_PORT:-8080}:8080"
+    networks:
+      - chirpstack-net
+
+  chirpstack-gateway-bridge:
+    image: chirpstack/chirpstack-gateway-bridge:4
+    container_name: chirpstack-gateway-bridge
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_UDP_PORT:-1700}:1700/udp"
+    volumes:
+      - gateway-bridge-config:/etc/chirpstack-gateway-bridge:ro
+    environment:
+      - INTEGRATION__MQTT__EVENT_TOPIC_TEMPLATE=${CHIRPSTACK_REGION:-eu868}/gateway/{{ .GatewayID }}/event/{{ .EventType }}
+      - INTEGRATION__MQTT__STATE_TOPIC_TEMPLATE=${CHIRPSTACK_REGION:-eu868}/gateway/{{ .GatewayID }}/state/{{ .StateType }}
+      - INTEGRATION__MQTT__COMMAND_TOPIC_TEMPLATE=${CHIRPSTACK_REGION:-eu868}/gateway/{{ .GatewayID }}/command/#
+      - INTEGRATION__MQTT__SERVER=tcp://mosquitto:1883
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+    networks:
+      - chirpstack-net
+ 
+  chirpstack-gateway-bridge-basicstation:
+    image: chirpstack/chirpstack-gateway-bridge:4
+    container_name: chirpstack-gateway-bridge-bs
+    restart: unless-stopped
+    command: -c /etc/chirpstack-gateway-bridge/chirpstack-gateway-bridge-basicstation-${CHIRPSTACK_REGION:-eu868}.toml
+    ports:
+      - "${GATEWAY_BASICSTATION_PORT:-3001}:3001"
+    volumes:
+      - gateway-bridge-config:/etc/chirpstack-gateway-bridge:ro
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_started
+    networks:
+      - chirpstack-net
+
+  chirpstack-rest-api:
+    image: chirpstack/chirpstack-rest-api:4
+    container_name: chirpstack-rest-api
+    restart: unless-stopped
+    command: --server chirpstack:8080 --bind 0.0.0.0:8090 --insecure
+    ports:
+      - "${CHIRPSTACK_API_PORT:-8090}:8090"
+    depends_on:
+      - chirpstack
+    networks:
+      - chirpstack-net
 
 volumes:
+  chirpstack-config:
+  gateway-bridge-config:
+  postgres-init-scripts:
   postgresqldata:
+  mosquitto-config:
+  mosquitto-data:
+  mosquitto-log:
   redisdata:
+
+networks:
+  chirpstack-net:
+    driver: bridge
