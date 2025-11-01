@@ -1,6 +1,8 @@
 # hidden files, exluding gitattributes
 .*
 !.gitattributes
+!.env.example
+.env
 
 # data folder
 /data
