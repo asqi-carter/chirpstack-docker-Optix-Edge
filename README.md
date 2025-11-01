@@ -1,99 +1,179 @@
-# ChirpStack Docker example
+# ChirpStack for OptixEdge
 
-This repository contains a skeleton to setup the [ChirpStack](https://www.chirpstack.io)
-open-source LoRaWAN Network Server (v4) using [Docker Compose](https://docs.docker.com/compose/).
+Deploy [ChirpStack](https://www.chirpstack.io) LoRaWAN Network Server (v4) on Rockwell Automation OptixEdge devices using Portainer.
+ 
+## Quick Start
 
-**Note:** Please use this `docker-compose.yml` file as a starting point for testing
-but keep in mind that for production usage it might need modifications. 
+1. In Portainer, navigate to **Stacks** → **Add stack**
+2. Name your stack (e.g., `chirpstack`)
+3. Choose one of:
+   - **Repository**: `https://github.com/asqi-carter/chirpstack-docker-Optix-Edge`
+   - **Web editor**: Paste the contents of `docker-compose.yml`
+4. Add optional env vars seen in .env.example
+5. Click **Deploy the stack**
+6. Wait for `config-init` to complete (shows "Exited" status)
+7. chirpstack-service will have some mqtt log errors on first deployment. stop and start the Portainer stack after first deployment to resolve
+8. Access ChirpStack at `http://<optixedge-ip>:8080`
 
-## Directory layout
+**Default credentials:**
+- Username: `admin`
+- Password: `admin`
 
-* `docker-compose.yml`: the docker-compose file containing the services
-* `configuration/chirpstack`: directory containing the ChirpStack configuration files
-* `configuration/chirpstack-gateway-bridge`: directory containing the ChirpStack Gateway Bridge configuration
-* `configuration/mosquitto`: directory containing the Mosquitto (MQTT broker) configuration
-* `configuration/postgresql/initdb/`: directory containing PostgreSQL initialization scripts
+## How This Works
 
-## Configuration
+This setup is optimized for OptixEdge devices, which restrict direct host filesystem access through Portainer.
 
-This setup is pre-configured for all regions. You can either connect a ChirpStack Gateway Bridge
-instance (v3.14.0+) to the MQTT broker (port 1883) or connect a Semtech UDP Packet Forwarder.
-Please note that:
+Traditional ChirpStack Docker deployments mount configuration files directly from the host. Since OptixEdge doesn't allow this, we use a different approach:
 
-* You must prefix the MQTT topic with the region.
-  Please see the region configuration files in the `configuration/chirpstack` for a list
-  of topic prefixes (e.g. eu868, us915_0, au915_0, as923_2, ...).
-* The protobuf marshaler is configured.
+**The `config-init` service:**
+1. Runs once during deployment
+2. Clones the official ChirpStack Docker repository
+3. Copies all configuration files to Docker volumes
+4. Auto-generates your API secret
+5. Exits (showing "Exited" status is normal)
 
-This setup also comes with two instances of the ChirpStack Gateway Bridge. One
-is configured to handle the Semtech UDP Packet Forwarder data (port 1700), the
-other is configured to handle the Basics Station protocol (port 3001). Both
-instances are by default configured for EU868 (using the `eu868` MQTT topic
-prefix).
+This gives you:
+- All upstream ChirpStack configurations automatically
+- No manual file management
+- Works within OptixEdge/Portainer constraints
+- Stays synchronized with official releases
 
-### Reconfigure regions
+Configuration files persist in Docker volumes and are reused on subsequent starts.
 
-ChirpStack has at least one configuration of each region enabled. You will find
-the list of `enabled_regions` in `configuration/chirpstack/chirpstack.toml`.
-Each entry in `enabled_regions` refers to the `id` that can be found in the
-`region_XXX.toml` file. This `region_XXX.toml` also contains a `topic_prefix`
-configuration which you need to configure the ChirpStack Gateway Bridge
-UDP instance (see below).
+## Configuration (Optional)
 
-#### ChirpStack Gateway Bridge (UDP)
+All env vars are optional.
 
-Within the `docker-compose.yml` file, you must replace the `eu868` prefix in the
-`INTEGRATION__..._TOPIC_TEMPLATE` configuration with the MQTT `topic_prefix` of
-the region you would like to use (e.g. `us915_0`, `au915_0`, `in865`, ...).
+To customize, add environment variables in Portainer when deploying the stack:
 
-#### ChirpStack Gateway Bridge (Basics Station)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHIRPSTACK_API_SECRET` | auto-generated | Override the auto-generated API secret |
+| `CHIRPSTACK_REGION` | `eu868` | LoRaWAN region for gateway bridge |
+| `CHIRPSTACK_NETWORK_ID` | `000000` | LoRaWAN Network ID (3 bytes hex) |
+| `CHIRPSTACK_HTTP_PORT` | `8080` | Web UI port |
+| `GATEWAY_UDP_PORT` | `1700` | Semtech UDP gateway port |
+| `GATEWAY_BASICSTATION_PORT` | `3001` | BasicStation gateway port |
 
-Within the `docker-compose.yml` file, you must update the configuration file
-that the ChirpStack Gateway Bridge instance must used. The default is
-`chirpstack-gateway-bridge-basicstation-eu868.toml`. For available
-configuration files, please see the `configuration/chirpstack-gateway-bridge`
-directory.
+### Supported Regions
 
-# Data persistence
+| Region | Description |
+|--------|-------------|
+| `eu868` | Europe 863-870 MHz |
+| `us915_0` - `us915_7` | United States (sub-bands) |
+| `au915_0` - `au915_7` | Australia (sub-bands) |
+| `as923`, `as923_2`, `as923_3`, `as923_4` | Asia Pacific |
+| `cn470_0` - `cn470_11` | China (sub-bands) |
+| `in865` | India |
+| `kr920` | South Korea |
+| `ru864` | Russia |
+| `cn779` | China 779 MHz |
+| `eu433` | Europe 433 MHz |
+| `ism2400` | ISM 2.4 GHz |
 
-PostgreSQL and Redis data is persisted in Docker volumes, see the `docker-compose.yml`
-`volumes` definition.
+## Connect a Gateway
 
-## Requirements
+### Semtech UDP Packet Forwarder
 
-Before using this `docker-compose.yml` file, make sure you have [Docker](https://www.docker.com/community-edition)
-installed.
+Configure your gateway with:
+- **Server address**: `<optixedge-ip>`
+- **Server port**: `1700`
+
+Example gateway configuration:
+```json
+{
+  "gateway_conf": {
+    "server_address": "192.168.1.100",
+    "serv_port_up": 1700,
+    "serv_port_down": 1700
+  }
+}
+```
+
+### ChirpStack MQTT Forwarder
+
+If your gateway runs ChirpStack Gateway Bridge or MQTT Forwarder:
+```toml
+[integration.mqtt]
+server="tcp://<optixedge-ip>:1883"
+```
+
+Ensure the `topic_prefix` matches your `CHIRPSTACK_REGION` setting.
 
 ## Importing device repository
 
-To import the [lorawan-devices](https://github.com/TheThingsNetwork/lorawan-devices)
-repository (optional step), run the following command:
+Import pre-configured device profiles from The Things Network's lorawan-devices repository:
 
+1. In Portainer, go to **Containers**
+2. Click `chirpstack-server`
+3. Click **Console** → select `/bin/sh` as command and `root` as user
+4. Click **Connect**
+5. Run:
 ```bash
-make import-lorawan-devices
+apk add --no-cache git && \
+git clone https://github.com/brocaar/lorawan-devices /tmp/lorawan-devices && \
+chirpstack -c /etc/chirpstack import-legacy-lorawan-devices-repository -d /tmp/lorawan-devices
 ```
+6. Wait 5-10 minutes for import to complete
+7. Device profile templates will appear in the ChirpStack web UI
 
-This will clone the `lorawan-devices` repository and execute the import command of ChirpStack.
-Please note that for this step you need to have the `make` command installed.
+This will clone the lorawan-devices repository and execute the import command of ChirpStack.
 
-**Note:** an older snapshot of the `lorawan-devices` repository is cloned as the
-latest revision no longer contains a `LICENSE` file.
+Note: an older snapshot of the lorawan-devices repository is cloned as the latest revision no longer contains a LICENSE file.
 
-## Usage
+## Troubleshooting
 
-To start the ChirpStack simply run:
+### Stack Won't Start
 
-```bash
-$ docker-compose up
-```
+Check the `config-init` container logs for errors. Ensure:
+- OptixEdge has internet access to clone the git repository
+- All previous stack containers are stopped
 
-After all the components have been initialized and started, you should be able
-to open http://localhost:8080/ in your browser.
+### MQTT Connection Errors
 
-##
+If you see MQTT connection errors in ChirpStack logs after first deployment:
 
-The example includes the [ChirpStack REST API](https://github.com/chirpstack/chirpstack-rest-api).
-You should be able to access the UI by opening http://localhost:8090 in your browser.
+1. In Portainer, go to **Stacks**
+2. Click your stack name
+3. Click **Stop** → wait for all containers to stop
+4. Click **Start**
 
-**Note:** It is recommended to use the [gRPC](https://www.chirpstack.io/docs/chirpstack/api/grpc.html)
-interface over the [REST](https://www.chirpstack.io/docs/chirpstack/api/rest.html) interface.
+This timing issue typically resolves after one restart.
+
+### Reset to Defaults
+
+To completely reset and redeploy:
+
+1. In Portainer, delete the stack
+2. Go to **Volumes** → delete all volumes starting with your stack name
+3. Redeploy the stack
+
+Warning: This deletes all data including devices, gateways, and your API secret.
+
+## Architecture
+
+This deployment includes:
+
+| Service | Description | Port |
+|---------|-------------|------|
+| chirpstack-postgres | PostgreSQL 14 database | Internal |
+| chirpstack-redis | Redis 7 cache | Internal |
+| chirpstack-mosquitto | MQTT broker | 1883 |
+| chirpstack-server | ChirpStack network server | 8080 |
+| chirpstack-gateway-bridge | Semtech UDP gateway bridge | 1700/udp |
+| chirpstack-gateway-bridge-bs | BasicStation gateway bridge | 3001 |
+| chirpstack-rest-api | REST API interface | 8090 |
+| config-init | One-time initialization | - |
+
+The `config-init` service clones configuration files from the official ChirpStack repository on first deployment and exits (normal behavior).
+
+## Links
+
+- [ChirpStack Documentation](https://www.chirpstack.io/)
+- [ChirpStack Community Forum](https://forum.chirpstack.io/)
+- [Original ChirpStack Docker Repository](https://github.com/chirpstack/chirpstack-docker)
+- [OptixEdge Documentation](https://www.rockwellautomation.com/en-us/products/software/factorytalk/optixedge.html)
+
+## License
+
+ChirpStack is licensed under the MIT License. See the [ChirpStack LICENSE](https://github.com/chirpstack/chirpstack/blob/master/LICENSE) for details.
